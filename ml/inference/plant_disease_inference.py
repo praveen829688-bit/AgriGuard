@@ -5,12 +5,10 @@ import torch
 from PIL import Image
 import torchvision.transforms.functional as TF
 
-from ml.models.cnn import CNN
 from ml.models.classes import IDX_TO_CLASS
-
+from ml.models.cnn import CNN
 
 # Render Free has limited RAM.
-# Keep PyTorch CPU threading intentionally small.
 torch.set_num_threads(1)
 
 try:
@@ -18,66 +16,51 @@ try:
 except RuntimeError:
     pass
 
-
 BASE_DIR = Path(__file__).resolve().parents[1]
-MODEL_PATH = BASE_DIR / "models" / "plant_disease_model_1_latest.pt"
 
-# AgriGuard Render deployment runs on CPU.
-DEVICE = torch.device("cpu")
-
+# Small INT8 dynamic-quantized model.
+MODEL_PATH = BASE_DIR / "models" / "plant_disease_model_quantized.pt"
 
 class PlantDiseaseInference:
-
     def __init__(self):
-        self.device = DEVICE
+        self.device = torch.device("cpu")
 
-        # Build the architecture.
+        print("Loading AgriGuard quantized CNN...")
+
+        # Recreate the architecture and apply the same
+        # dynamic INT8 quantization used when creating the model.
         self.model = CNN(39)
 
-        # Memory-map the checkpoint instead of copying the entire
-        # checkpoint into normal RAM during deserialization.
-        try:
-            state_dict = torch.load(
-                MODEL_PATH,
-                map_location="cpu",
-                weights_only=True,
-                mmap=True
-            )
-        except TypeError:
-            state_dict = torch.load(
-                MODEL_PATH,
-                map_location="cpu"
-            )
+        self.model = torch.ao.quantization.quantize_dynamic(
+            self.model,
+            {torch.nn.Linear},
+            dtype=torch.qint8
+        )
 
-        # assign=True makes the model parameters use the loaded
-        # tensors directly instead of copying all weights again.
-        try:
-            self.model.load_state_dict(
-                state_dict,
-                assign=True
-            )
-        except TypeError:
-            # Compatibility fallback.
-            self.model.load_state_dict(state_dict)
+        state_dict = torch.load(
+            MODEL_PATH,
+            map_location="cpu",
+            weights_only=True
+        )
+
+        self.model.load_state_dict(state_dict)
 
         del state_dict
         gc.collect()
 
         self.model.eval()
 
-    def predict(self, image: Image.Image):
+        print("AgriGuard quantized CNN loaded successfully.")
 
+    def predict(self, image: Image.Image):
         image = image.convert("RGB")
         image = image.resize((224, 224))
 
-        input_data = TF.to_tensor(image)
-        input_data = input_data.unsqueeze(0)
+        input_data = TF.to_tensor(image).unsqueeze(0)
 
         with torch.inference_mode():
             output = self.model(input_data)
-
             probabilities = torch.softmax(output, dim=1)
-
             confidence, predicted_index = torch.max(
                 probabilities,
                 dim=1
@@ -116,7 +99,6 @@ _engine = None
 
 
 def get_inference_engine():
-
     global _engine
 
     if _engine is None:
@@ -126,7 +108,5 @@ def get_inference_engine():
 
 
 def predict_image(image: Image.Image):
-
     engine = get_inference_engine()
-
     return engine.predict(image)
