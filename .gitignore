@@ -1,0 +1,14 @@
+﻿node_modules/
+dist/
+.env
+.env.local
+.env.production
+__pycache__/
+*.py[cod]
+backend/.venv/
+.venv/
+*.log
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
