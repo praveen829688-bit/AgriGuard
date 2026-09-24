@@ -3,7 +3,6 @@ from pathlib import Path
 import numpy as np
 import onnxruntime as ort
 from PIL import Image
-import torchvision.transforms.functional as TF
 
 from ml.models.classes import IDX_TO_CLASS
 
@@ -18,26 +17,44 @@ def get_inference_session():
     global _session
 
     if _session is None:
+        options = ort.SessionOptions()
+
+        # Keep Render Free memory and CPU usage low.
+        options.intra_op_num_threads = 1
+        options.inter_op_num_threads = 1
+        options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+        options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_BASIC
+        options.enable_mem_pattern = False
+        options.enable_cpu_mem_arena = True
+
         _session = ort.InferenceSession(
             str(MODEL_PATH),
+            sess_options=options,
             providers=["CPUExecutionProvider"]
         )
 
     return _session
 
 
-def predict_image(image: Image.Image):
-    session = get_inference_session()
-
+def prepare_image(image: Image.Image):
     image = image.convert("RGB")
     image = image.resize((224, 224))
 
-    input_data = (
-        TF.to_tensor(image)
-        .unsqueeze(0)
-        .numpy()
-        .astype(np.float32)
-    )
+    array = np.asarray(image, dtype=np.float32) / 255.0
+
+    # HWC -> CHW
+    array = np.transpose(array, (2, 0, 1))
+
+    # Add batch dimension
+    array = np.expand_dims(array, axis=0)
+
+    return np.ascontiguousarray(array, dtype=np.float32)
+
+
+def predict_image(image: Image.Image):
+    session = get_inference_session()
+
+    input_data = prepare_image(image)
 
     input_name = session.get_inputs()[0].name
 
@@ -48,11 +65,16 @@ def predict_image(image: Image.Image):
         }
     )[0]
 
-    output = output.astype(np.float32)
+    output = np.asarray(output, dtype=np.float32)
 
-    exp_output = np.exp(
-        output - np.max(output, axis=1, keepdims=True)
+    # Stable softmax.
+    shifted = output - np.max(
+        output,
+        axis=1,
+        keepdims=True
     )
+
+    exp_output = np.exp(shifted)
 
     probabilities = exp_output / np.sum(
         exp_output,
@@ -60,7 +82,9 @@ def predict_image(image: Image.Image):
         keepdims=True
     )
 
-    predicted_index = int(np.argmax(probabilities[0]))
+    predicted_index = int(
+        np.argmax(probabilities[0])
+    )
 
     confidence = float(
         probabilities[0][predicted_index] * 100
