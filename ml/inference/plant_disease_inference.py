@@ -9,7 +9,8 @@ from ml.models.cnn import CNN
 from ml.models.classes import IDX_TO_CLASS
 
 
-# Keep CPU memory usage lower on small cloud instances.
+# Render Free has limited RAM.
+# Keep PyTorch CPU threading intentionally small.
 torch.set_num_threads(1)
 
 try:
@@ -21,9 +22,8 @@ except RuntimeError:
 BASE_DIR = Path(__file__).resolve().parents[1]
 MODEL_PATH = BASE_DIR / "models" / "plant_disease_model_1_latest.pt"
 
-DEVICE = torch.device(
-    "cuda" if torch.cuda.is_available() else "cpu"
-)
+# AgriGuard Render deployment runs on CPU.
+DEVICE = torch.device("cpu")
 
 
 class PlantDiseaseInference:
@@ -31,11 +31,11 @@ class PlantDiseaseInference:
     def __init__(self):
         self.device = DEVICE
 
-        # Create the model only once.
+        # Build the architecture.
         self.model = CNN(39)
 
-        # Memory-map the checkpoint where supported.
-        # weights_only avoids unnecessary deserialization overhead.
+        # Memory-map the checkpoint instead of copying the entire
+        # checkpoint into normal RAM during deserialization.
         try:
             state_dict = torch.load(
                 MODEL_PATH,
@@ -44,19 +44,25 @@ class PlantDiseaseInference:
                 mmap=True
             )
         except TypeError:
-            # Compatibility fallback for older PyTorch versions.
             state_dict = torch.load(
                 MODEL_PATH,
                 map_location="cpu"
             )
 
-        self.model.load_state_dict(state_dict)
+        # assign=True makes the model parameters use the loaded
+        # tensors directly instead of copying all weights again.
+        try:
+            self.model.load_state_dict(
+                state_dict,
+                assign=True
+            )
+        except TypeError:
+            # Compatibility fallback.
+            self.model.load_state_dict(state_dict)
 
-        # Release checkpoint memory immediately after loading.
         del state_dict
         gc.collect()
 
-        self.model.to(self.device)
         self.model.eval()
 
     def predict(self, image: Image.Image):
@@ -66,9 +72,7 @@ class PlantDiseaseInference:
 
         input_data = TF.to_tensor(image)
         input_data = input_data.unsqueeze(0)
-        input_data = input_data.to(self.device)
 
-        # Inference mode uses less memory than normal autograd mode.
         with torch.inference_mode():
             output = self.model(input_data)
 
@@ -93,7 +97,6 @@ class PlantDiseaseInference:
             crop = "Unknown"
             disease = class_name
 
-        # Release temporary tensors before returning.
         del input_data
         del output
         del probabilities
